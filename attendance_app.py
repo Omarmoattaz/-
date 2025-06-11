@@ -1,6 +1,7 @@
 import streamlit as st
 import pandas as pd
 from datetime import datetime
+from io import BytesIO
 
 st.title("تطبيق حساب الحضور والانصراف")
 
@@ -53,14 +54,19 @@ if uploaded_file:
             st.success("✅ تم تحليل الملف بنجاح")
             st.dataframe(result_df)
 
-            # زر التصدير
-            @st.cache_data
-            def convert_df(df):
-                return df.to_excel(index=False, engine="openpyxl")
+            # تصدير Excel في الذاكرة
+            def convert_df_to_excel(df):
+                output = BytesIO()
+                with pd.ExcelWriter(output, engine='openpyxl') as writer:
+                    df.to_excel(writer, index=False)
+                processed_data = output.getvalue()
+                return processed_data
+
+            excel_data = convert_df_to_excel(result_df)
 
             st.download_button(
                 label="⬇️ تحميل النتائج Excel",
-                data=convert_df(result_df),
+                data=excel_data,
                 file_name="الحضور_والانصراف.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
             )
