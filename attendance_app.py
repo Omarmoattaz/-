@@ -1,75 +1,89 @@
 import streamlit as st
 import pandas as pd
-from datetime import datetime
-from io import BytesIO
+from datetime import datetime, timedelta
 
-st.title("تطبيق حساب الحضور والانصراف")
+st.set_page_config(page_title="تحليل الحضور والانصراف", layout="centered")
 
-uploaded_file = st.file_uploader("ارفع ملف البصمة (Excel)", type=["xlsx"])
+st.title("📊 نظام تحليل البصمة")
+uploaded_file = st.file_uploader("📎 ارفع ملف Excel من جهاز البصمة", type=["xlsx"])
 
 if uploaded_file:
     try:
         df = pd.read_excel(uploaded_file)
 
-        # تأكد من الأعمدة
-        required_columns = ["Name", "Date", "Time", "Status"]
-        if not all(col in df.columns for col in required_columns):
-            st.error("⚠️ تأكد أن ملفك يحتوي على الأعمدة التالية: Name, Date, Time, Status")
+        # التحقق من الأعمدة المطلوبة
+        expected_columns = ['Department', 'Name', 'No.', 'Date', 'Time', 'Status']
+        if not all(col in df.columns for col in expected_columns):
+            st.error("❌ تأكد أن الأعمدة في الملف هي: Department, Name, No., Date, Time, Status")
         else:
-            df["Date"] = pd.to_datetime(df["Date"]).dt.date
-            df["Time"] = pd.to_datetime(df["Time"].astype(str)).dt.time
+            # دمج التاريخ والوقت
+            df['DateTime'] = pd.to_datetime(df['Date'].astype(str) + ' ' + df['Time'].astype(str), errors='coerce')
+            df.dropna(subset=['DateTime'], inplace=True)
+            df['DateOnly'] = df['DateTime'].dt.date
+            df['TimeOnly'] = df['DateTime'].dt.time
 
-            # تجميع التاريخ والوقت في عمود واحد datetime كامل
-            df["DateTime"] = df.apply(lambda row: datetime.combine(row["Date"], row["Time"]), axis=1)
+            # تجهيز البيانات
+            attendance_summary = []
+            grouped = df.groupby(['Name', 'DateOnly'])
 
-            df.sort_values(["Name", "DateTime"], inplace=True)
-
-            result = []
-
-            grouped = df.groupby(["Name", "Date"])
             for (name, date), group in grouped:
-                in_times = group[group["Status"] == "C/In"]["DateTime"]
-                out_times = group[group["Status"] == "C/Out"]["DateTime"]
+                in_times = group[group['Status'] == 'C/In']['DateTime'].sort_values()
+                out_times = group[group['Status'] == 'C/Out']['DateTime'].sort_values()
 
-                first_in = in_times.min() if not in_times.empty else None
-                last_out = out_times.max() if not out_times.empty else None
+                first_in = in_times.iloc[0].time() if not in_times.empty else None
+                last_out = out_times.iloc[-1].time() if not out_times.empty else None
 
-                if first_in and last_out and last_out > first_in:
-                    duration = last_out - first_in
-                    hours = duration.total_seconds() // 3600
-                    minutes = (duration.total_seconds() % 3600) // 60
-                    work_time = f"{int(hours)}س {int(minutes)}د"
-                else:
-                    work_time = "--"
+                # حساب ساعات العمل
+                work_duration = None
+                if first_in and last_out:
+                    in_dt = datetime.combine(date, first_in)
+                    out_dt = datetime.combine(date, last_out)
+                    work_duration = out_dt - in_dt
 
-                result.append({
-                    "الموظف": name,
-                    "التاريخ": date,
-                    "أول دخول": first_in.time().strftime("%H:%M") if first_in else "--",
-                    "آخر انصراف": last_out.time().strftime("%H:%M") if last_out else "--",
-                    "ساعات العمل": work_time
+                attendance_summary.append({
+                    'الاسم': name,
+                    'التاريخ': date,
+                    'الحضور': first_in.strftime("%H:%M:%S") if first_in else "--",
+                    'الانصراف': last_out.strftime("%H:%M:%S") if last_out else "--",
+                    'ساعات العمل': f"{work_duration.seconds // 3600}س {(work_duration.seconds % 3600) // 60}د" if work_duration else "--",
+                    'المدة': work_duration if work_duration else timedelta(0)
                 })
 
-            result_df = pd.DataFrame(result)
-            st.success("✅ تم تحليل الملف بنجاح")
-            st.dataframe(result_df)
+            summary_df = pd.DataFrame(attendance_summary)
 
-            # تصدير Excel في الذاكرة
-            def convert_df_to_excel(df):
-                output = BytesIO()
-                with pd.ExcelWriter(output, engine='openpyxl') as writer:
-                    df.to_excel(writer, index=False)
-                processed_data = output.getvalue()
-                return processed_data
+            # عرض الجدول اليومي
+            st.subheader("📅 الجدول اليومي")
+            st.dataframe(summary_df.drop(columns=['المدة']))
 
-            excel_data = convert_df_to_excel(result_df)
+            # ملخص إجمالي لكل موظف
+            st.subheader("📌 ملخص لكل موظف")
+            final_summary = summary_df.groupby('الاسم').agg({
+                'التاريخ': 'count',
+                'المدة': 'sum'
+            }).reset_index()
+            final_summary.rename(columns={
+                'التاريخ': 'عدد أيام العمل',
+                'المدة': 'إجمالي الساعات'
+            }, inplace=True)
 
-            st.download_button(
-                label="⬇️ تحميل النتائج Excel",
-                data=excel_data,
-                file_name="الحضور_والانصراف.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-            )
+            # تنسيق مدة الوقت
+            def format_timedelta(td):
+                total_minutes = int(td.total_seconds() // 60)
+                hours = total_minutes // 60
+                minutes = total_minutes % 60
+                return f"{hours}س {minutes}د"
+
+            final_summary['إجمالي الساعات'] = final_summary['إجمالي الساعات'].apply(format_timedelta)
+            st.dataframe(final_summary)
+
+            # تحميل النتائج
+            output_file = pd.ExcelWriter("تحليل_الحضور.xlsx", engine="openpyxl")
+            summary_df.drop(columns=['المدة']).to_excel(output_file, sheet_name="الحضور اليومي", index=False)
+            final_summary.to_excel(output_file, sheet_name="ملخص الموظف", index=False)
+            output_file.close()
+
+            with open("تحليل_الحضور.xlsx", "rb") as file:
+                st.download_button("⬇️ تحميل النتيجة كـ Excel", file.read(), file_name="تحليل_الحضور.xlsx")
 
     except Exception as e:
-        st.error(f"حدث خطأ أثناء قراءة الملف: {e}")
+        st.error(f"❌ حدث خطأ أثناء قراءة الملف: {e}")
