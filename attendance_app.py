@@ -1,101 +1,93 @@
+
+import streamlit as st
 import pandas as pd
-import datetime
+from datetime import datetime
 
-# Load the uploaded Excel file
-file_path = "/mnt/data/sample_attendance.xlsx.xlsx"
-df = pd.read_excel(file_path)
+st.set_page_config(page_title="تطبيق الحضور والانصراف", layout="wide")
 
-# Ensure proper column names
-df.columns = df.columns.str.strip()
+st.title("📊 تطبيق حساب الحضور والانصراف من ملف البصمة")
 
-# Rename columns to match expected names
-df = df.rename(columns={
-    "Name": "الاسم",
-    "Date": "التاريخ",
-    "Time": "الوقت",
-    "Status": "النوع"
-})
+uploaded_file = st.file_uploader("📂 ارفع ملف البصمة (Excel)", type=["xlsx"])
 
-# Filter to only necessary columns
-df = df[["الاسم", "التاريخ", "الوقت", "النوع"]]
+if uploaded_file:
+    try:
+        df = pd.read_excel(uploaded_file)
+        df.columns = df.columns.str.strip()
 
-# Convert التاريخ to datetime and الوقت to time
-df["التاريخ"] = pd.to_datetime(df["التاريخ"], errors='coerce').dt.date
-df["الوقت"] = pd.to_datetime(df["الوقت"].astype(str), format='%H:%M:%S').dt.time
+        required_columns = {"Name", "Date", "Time", "Status"}
+        if not required_columns.issubset(df.columns):
+            st.error("❌ الملف لا يحتوي على الأعمدة المطلوبة: Name, Date, Time, Status")
+        else:
+            df["Date"] = pd.to_datetime(df["Date"], dayfirst=True).dt.date
+            df["Time"] = pd.to_datetime(df["Time"]).dt.time
+            df["Datetime"] = df.apply(lambda row: datetime.combine(row["Date"], row["Time"]), axis=1)
 
-# Remove rows with invalid dates
-df = df.dropna(subset=["التاريخ"])
+            grouped = df.groupby(["Name", "Date"])
+            attendance_data = []
 
-# Sort by name and datetime
-df = df.sort_values(by=["الاسم", "التاريخ", "الوقت"])
+            summary = {}
 
-# Group by employee and date
-grouped = df.groupby(["الاسم", "التاريخ"])
+            all_dates = sorted(df["Date"].unique())
 
-# Prepare daily summaries
-daily_summary = []
-for (name, date), group in grouped:
-    ins = group[group["النوع"] == "C/In"]["الوقت"].tolist()
-    outs = group[group["النوع"] == "C/Out"]["الوقت"].tolist()
+            for (name, date), group in grouped:
+                in_times = group[group["Status"] == "C/In"].sort_values("Datetime")["Time"].tolist()
+                out_times = group[group["Status"] == "C/Out"].sort_values("Datetime")["Time"].tolist()
 
-    first_in = min(ins) if ins else None
-    last_out = max(outs) if outs else None
+                first_in = in_times[0] if in_times else "--"
+                last_out = out_times[-1] if out_times else "--"
 
-    # Calculate working hours
-    ساعات_العمل = "--"
-    if first_in and last_out:
-        dt_in = datetime.datetime.combine(date, first_in)
-        dt_out = datetime.datetime.combine(date, last_out)
-        diff = dt_out - dt_in
-        hours = diff.seconds // 3600
-        minutes = (diff.seconds % 3600) // 60
-        ساعات_العمل = f"{hours}س {minutes}د"
+                work_hours = "--"
+                if first_in != "--" and last_out != "--":
+                    in_dt = datetime.combine(date, first_in)
+                    out_dt = datetime.combine(date, last_out)
+                    diff = out_dt - in_dt
+                    hours, remainder = divmod(diff.seconds, 3600)
+                    minutes = remainder // 60
+                    work_hours = f"{hours}س {minutes}د"
 
-    daily_summary.append({
-        "الاسم": name,
-        "التاريخ": date,
-        "الحضور": first_in.strftime('%H:%M:%S') if first_in else "--",
-        "الانصراف": last_out.strftime('%H:%M:%S') if last_out else "--",
-        "ساعات العمل": ساعات_العمل
-    })
+                    if name not in summary:
+                        summary[name] = {
+                            "total_seconds": 0,
+                            "days": set(),
+                            "in_count": 0,
+                            "out_count": 0,
+                            "dates": set(all_dates)
+                        }
+                    summary[name]["total_seconds"] += diff.total_seconds()
+                    summary[name]["days"].add(date)
 
-daily_df = pd.DataFrame(daily_summary)
+                if name in summary:
+                    summary[name]["in_count"] += len(in_times)
+                    summary[name]["out_count"] += len(out_times)
 
-# Prepare summary table
-summary = []
-for name, group in daily_df.groupby("الاسم"):
-    total_days = group.shape[0]
-    work_days = group[(group["الحضور"] != "--") & (group["الانصراف"] != "--")]
-    total_work_days = work_days.shape[0]
-    
-    total_minutes = 0
-    for row in work_days["ساعات العمل"]:
-        if row != "--":
-            parts = row.split("س ")
-            hours = int(parts[0])
-            minutes = int(parts[1].replace("د", "")) if len(parts) > 1 else 0
-            total_minutes += hours * 60 + minutes
-    total_hours = total_minutes // 60
-    remaining_minutes = total_minutes % 60
+                attendance_data.append({
+                    "الاسم": name,
+                    "التاريخ": date.strftime("%Y-%m-%d"),
+                    "أول حضور": first_in if first_in == "--" else first_in.strftime("%H:%M"),
+                    "آخر انصراف": last_out if last_out == "--" else last_out.strftime("%H:%M"),
+                    "ساعات العمل": work_hours
+                })
 
-    summary.append({
-        "الاسم": name,
-        "عدد الأيام": total_days,
-        "أيام العمل": total_work_days,
-        "إجمالي ساعات العمل": f"{total_hours}س {remaining_minutes}د"
-    })
+            st.subheader("📅 جدول الحضور والانصراف")
+            st.dataframe(attendance_data, use_container_width=True)
 
-summary_df = pd.DataFrame(summary)
+            st.subheader("📈 ملخص كل موظف")
+            summary_table = []
+            for name, data in summary.items():
+                total_hours = int(data["total_seconds"] // 3600)
+                total_minutes = int((data["total_seconds"] % 3600) // 60)
+                missing_days = [d.strftime("%Y-%m-%d") for d in data["dates"] if d not in data["days"]]
 
-daily_df.head(), summary_df.head()
+                summary_table.append({
+                    "الاسم": name,
+                    "إجمالي ساعات العمل": f"{total_hours}س {total_minutes}د",
+                    "عدد أيام الحضور": len(data["days"]),
+                    "عدد مرات البصمة (دخول)": data["in_count"],
+                    "عدد مرات البصمة (انصراف)": data["out_count"],
+                    "أيام بدون حضور أو انصراف": ", ".join(missing_days) if missing_days else "لا يوجد"
+                })
 
-
-            st.download_button(
-                label="⬇️ تحميل النتائج Excel",
-                data=excel_data,
-                file_name="الحضور_والانصراف.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-            )
+            st.dataframe(summary_table, use_container_width=True)
 
     except Exception as e:
-        st.error(f"حدث خطأ أثناء قراءة الملف: {e}")
+        st.error(f"حدث خطأ أثناء قراءة الملف: {str(e)}")
