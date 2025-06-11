@@ -1,68 +1,94 @@
-import streamlit as st
 import pandas as pd
-from datetime import datetime
-from io import BytesIO
+import datetime
 
-st.title("تطبيق حساب الحضور والانصراف")
+# Load the uploaded Excel file
+file_path = "/mnt/data/sample_attendance.xlsx.xlsx"
+df = pd.read_excel(file_path)
 
-uploaded_file = st.file_uploader("ارفع ملف البصمة (Excel)", type=["xlsx"])
+# Ensure proper column names
+df.columns = df.columns.str.strip()
 
-if uploaded_file:
-    try:
-        df = pd.read_excel(uploaded_file)
+# Rename columns to match expected names
+df = df.rename(columns={
+    "Name": "الاسم",
+    "Date": "التاريخ",
+    "Time": "الوقت",
+    "Status": "النوع"
+})
 
-        # تأكد من الأعمدة
-        required_columns = ["Name", "Date", "Time", "Status"]
-        if not all(col in df.columns for col in required_columns):
-            st.error("⚠️ تأكد أن ملفك يحتوي على الأعمدة التالية: Name, Date, Time, Status")
-        else:
-            df["Date"] = pd.to_datetime(df["Date"]).dt.date
-            df["Time"] = pd.to_datetime(df["Time"].astype(str)).dt.time
+# Filter to only necessary columns
+df = df[["الاسم", "التاريخ", "الوقت", "النوع"]]
 
-            # تجميع التاريخ والوقت في عمود واحد datetime كامل
-            df["DateTime"] = df.apply(lambda row: datetime.combine(row["Date"], row["Time"]), axis=1)
+# Convert التاريخ to datetime and الوقت to time
+df["التاريخ"] = pd.to_datetime(df["التاريخ"], errors='coerce').dt.date
+df["الوقت"] = pd.to_datetime(df["الوقت"].astype(str), format='%H:%M:%S').dt.time
 
-            df.sort_values(["Name", "DateTime"], inplace=True)
+# Remove rows with invalid dates
+df = df.dropna(subset=["التاريخ"])
 
-            result = []
+# Sort by name and datetime
+df = df.sort_values(by=["الاسم", "التاريخ", "الوقت"])
 
-            grouped = df.groupby(["Name", "Date"])
-            for (name, date), group in grouped:
-                in_times = group[group["Status"] == "C/In"]["DateTime"]
-                out_times = group[group["Status"] == "C/Out"]["DateTime"]
+# Group by employee and date
+grouped = df.groupby(["الاسم", "التاريخ"])
 
-                first_in = in_times.min() if not in_times.empty else None
-                last_out = out_times.max() if not out_times.empty else None
+# Prepare daily summaries
+daily_summary = []
+for (name, date), group in grouped:
+    ins = group[group["النوع"] == "C/In"]["الوقت"].tolist()
+    outs = group[group["النوع"] == "C/Out"]["الوقت"].tolist()
 
-                if first_in and last_out and last_out > first_in:
-                    duration = last_out - first_in
-                    hours = duration.total_seconds() // 3600
-                    minutes = (duration.total_seconds() % 3600) // 60
-                    work_time = f"{int(hours)}س {int(minutes)}د"
-                else:
-                    work_time = "--"
+    first_in = min(ins) if ins else None
+    last_out = max(outs) if outs else None
 
-                result.append({
-                    "الموظف": name,
-                    "التاريخ": date,
-                    "أول دخول": first_in.time().strftime("%H:%M") if first_in else "--",
-                    "آخر انصراف": last_out.time().strftime("%H:%M") if last_out else "--",
-                    "ساعات العمل": work_time
-                })
+    # Calculate working hours
+    ساعات_العمل = "--"
+    if first_in and last_out:
+        dt_in = datetime.datetime.combine(date, first_in)
+        dt_out = datetime.datetime.combine(date, last_out)
+        diff = dt_out - dt_in
+        hours = diff.seconds // 3600
+        minutes = (diff.seconds % 3600) // 60
+        ساعات_العمل = f"{hours}س {minutes}د"
 
-            result_df = pd.DataFrame(result)
-            st.success("✅ تم تحليل الملف بنجاح")
-            st.dataframe(result_df)
+    daily_summary.append({
+        "الاسم": name,
+        "التاريخ": date,
+        "الحضور": first_in.strftime('%H:%M:%S') if first_in else "--",
+        "الانصراف": last_out.strftime('%H:%M:%S') if last_out else "--",
+        "ساعات العمل": ساعات_العمل
+    })
 
-            # تصدير Excel في الذاكرة
-            def convert_df_to_excel(df):
-                output = BytesIO()
-                with pd.ExcelWriter(output, engine='openpyxl') as writer:
-                    df.to_excel(writer, index=False)
-                processed_data = output.getvalue()
-                return processed_data
+daily_df = pd.DataFrame(daily_summary)
 
-            excel_data = convert_df_to_excel(result_df)
+# Prepare summary table
+summary = []
+for name, group in daily_df.groupby("الاسم"):
+    total_days = group.shape[0]
+    work_days = group[(group["الحضور"] != "--") & (group["الانصراف"] != "--")]
+    total_work_days = work_days.shape[0]
+    
+    total_minutes = 0
+    for row in work_days["ساعات العمل"]:
+        if row != "--":
+            parts = row.split("س ")
+            hours = int(parts[0])
+            minutes = int(parts[1].replace("د", "")) if len(parts) > 1 else 0
+            total_minutes += hours * 60 + minutes
+    total_hours = total_minutes // 60
+    remaining_minutes = total_minutes % 60
+
+    summary.append({
+        "الاسم": name,
+        "عدد الأيام": total_days,
+        "أيام العمل": total_work_days,
+        "إجمالي ساعات العمل": f"{total_hours}س {remaining_minutes}د"
+    })
+
+summary_df = pd.DataFrame(summary)
+
+daily_df.head(), summary_df.head()
+
 
             st.download_button(
                 label="⬇️ تحميل النتائج Excel",
